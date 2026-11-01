@@ -15,6 +15,7 @@
 //! 所有状态集中在 [`STATE`] 一处，按连接隔离；禁止跨 `.await` 持锁。
 
 use enigo::{Enigo, MouseControllable};
+use hbb_common::log;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
