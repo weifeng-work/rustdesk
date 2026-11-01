@@ -2867,6 +2867,9 @@ impl Connection {
     async fn handle_login_request_without_validation(&mut self, lr: &LoginRequest) {
         self.lr = lr.clone();
         self.peer_argb = crate::str2color(&format!("{}{}", &lr.my_id, &lr.my_platform), 0xff);
+        // 协作模式：登记租客身份并拉起承载虚拟光标的 whiteboard 浮窗。
+        #[cfg(target_os = "windows")]
+        super::collab::attach(self.inner.id(), lr.my_name.clone(), self.peer_argb);
         if let Some(o) = lr.option.as_ref() {
             self.options_in_login = Some(o.clone());
         }
