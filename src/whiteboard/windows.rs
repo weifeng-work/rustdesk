@@ -33,9 +33,13 @@ pub(super) fn create_event_loop() -> ResultType<()> {
         .with_decorations(false);
 
     let mut final_size = None;
+    // 虚拟桌面可能不在 (0,0) 起算（多显示器时常见负原点）。覆盖窗按这个原点摆放，
+    // 而收到的光标坐标是桌面绝对坐标，绘制前必须减掉原点，否则会整体偏移。
+    let mut origin = (0i32, 0i32);
     if let Ok((x, y, w, h)) = super::server::get_displays_rect() {
         if w > 0 && h > 0 {
             final_size = Some(PhysicalSize::new(w, h));
+            origin = (x, y);
             window_builder = window_builder
                 .with_position(PhysicalPosition::new(x, y))
                 .with_inner_size(PhysicalSize::new(1, 1));
@@ -133,7 +137,11 @@ pub(super) fn create_event_loop() -> ResultType<()> {
                     ripple_paint.anti_alias = true;
 
                     let mut ripple_pb = PathBuilder::new();
-                    ripple_pb.push_circle(ripple.x, ripple.y, radius);
+                    ripple_pb.push_circle(
+                        ripple.x - origin.0 as f32,
+                        ripple.y - origin.1 as f32,
+                        radius,
+                    );
                     if let Some(path) = ripple_pb.finish() {
                         pixmap.fill_path(
                             &path,
@@ -146,7 +154,10 @@ pub(super) fn create_event_loop() -> ResultType<()> {
                 }
 
                 for cursor in last_cursors.values() {
-                    let (x, y) = (cursor.x, cursor.y);
+                    let (x, y) = (
+                        cursor.x - origin.0 as f32,
+                        cursor.y - origin.1 as f32,
+                    );
                     let size = 1.5f32;
 
                     let mut pb = PathBuilder::new();
