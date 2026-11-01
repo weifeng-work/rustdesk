@@ -71,10 +71,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Generate inlined UI resources
+        shell: bash
+        # Sciter UI 必须带 inline 特性。src/ui.rs:178 在未开 inline 时会去读
+        # <cwd>/src/ui/index.html，产物一旦离开源码树就是白屏。
+        # src/ui/inline.rs 由该脚本生成，且被 .gitignore:8 忽略。
+        run: |
+          python res/inline-sciter.py
+          ls -l src/ui/inline.rs
+
       - name: cargo build (release)
         shell: bash
         run: |
-          cargo build --release --locked 2>&1 | tee /tmp/build.log
+          cargo build --release --locked --features inline 2>&1 | tee build.log
           exit ${PIPESTATUS[0]}
 
       - name: Fetch sciter runtime
@@ -109,5 +118,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cargo-build-log
-          path: /tmp/build.log
+          path: build.log
           if-no-files-found: ignore
