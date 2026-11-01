@@ -19,7 +19,7 @@ env:
 
 jobs:
   check-windows:
-    name: cargo check (x86_64-pc-windows-msvc)
+    name: build (x86_64-pc-windows-msvc)
     runs-on: windows-2022
     timeout-minutes: 180
 
@@ -71,16 +71,39 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo check
+      - name: cargo build (release)
         shell: bash
         run: |
-          cargo check --release --locked 2>&1 | tee /tmp/check.log
+          cargo build --release --locked 2>&1 | tee /tmp/build.log
           exit ${PIPESTATUS[0]}
 
-      - name: Upload check log
+      - name: Package artifact
+        if: success()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item target/release/rustdesk.exe out/
+          # Sciter UI 版是动态加载 sciter.dll 的（src/ui.rs:63），必须一起打包
+          Get-ChildItem -Path target -Recurse -Filter "sciter*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName out/ -Force; Write-Host "bundled $($_.Name)" }
+          Get-ChildItem -Path res -Filter "*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName out/ -Force; Write-Host "bundled $($_.Name)" }
+          Get-ChildItem out | Format-Table Name, Length
+          Compress-Archive -Path out/* -DestinationPath rustdesk-collab-m1-windows-x64.zip -Force
+
+      - name: Upload binary
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-collab-m1-windows-x64
+          path: rustdesk-collab-m1-windows-x64.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cargo-check-log
-          path: /tmp/check.log
+          name: cargo-build-log
+          path: /tmp/build.log
           if-no-files-found: ignore
