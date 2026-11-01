@@ -670,9 +670,12 @@ pub fn try_start_record_cursor_pos() -> Option<thread::JoinHandle<()>> {
             }
 
             let now = time::Instant::now();
-            if let Some((x, y)) = crate::get_cursor_pos() {
+            let pos = crate::get_cursor_pos();
+            if let Some((x, y)) = pos {
                 update_last_cursor_pos(x, y);
             }
+            #[cfg(windows)]
+            super::collab::poll(pos);
             let elapsed = now.elapsed();
             if elapsed < interval {
                 thread::sleep(interval - elapsed);
@@ -1331,6 +1334,11 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
             };
             #[cfg(not(target_os = "linux"))]
             let (mx, my) = (evt.x, evt.y);
+            #[cfg(windows)]
+            if super::collab::on_move(conn, mx, my) {
+                en.mouse_move_to(mx, my);
+            }
+            #[cfg(not(windows))]
             en.mouse_move_to(mx, my);
             // Only the uinput point is in the layout space the calibration measures in.
             #[cfg(all(target_os = "linux", feature = "drm"))]
@@ -1374,43 +1382,70 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
                 };
             }
         }
-        MOUSE_TYPE_DOWN => match buttons {
-            MOUSE_BUTTON_LEFT => {
-                allow_err!(en.mouse_down(MouseButton::Left));
+        MOUSE_TYPE_DOWN => {
+            // 协作模式：只有持有者能按下；真到这一刻才把真实光标瞬移过来。
+            #[cfg(windows)]
+            let admitted = super::collab::admit_press(conn);
+            #[cfg(not(windows))]
+            let admitted = true;
+            #[cfg(windows)]
+            if let Some((px, py)) = super::collab::press_target(conn) {
+                en.mouse_move_to(px, py);
             }
-            MOUSE_BUTTON_RIGHT => {
-                allow_err!(en.mouse_down(MouseButton::Right));
+            if admitted {
+                match buttons {
+                    MOUSE_BUTTON_LEFT => {
+                        allow_err!(en.mouse_down(MouseButton::Left));
+                    }
+                    MOUSE_BUTTON_RIGHT => {
+                        allow_err!(en.mouse_down(MouseButton::Right));
+                    }
+                    MOUSE_BUTTON_WHEEL => {
+                        allow_err!(en.mouse_down(MouseButton::Middle));
+                    }
+                    MOUSE_BUTTON_BACK => {
+                        allow_err!(en.mouse_down(MouseButton::Back));
+                    }
+                    MOUSE_BUTTON_FORWARD => {
+                        allow_err!(en.mouse_down(MouseButton::Forward));
+                    }
+                    _ => {}
+                }
             }
-            MOUSE_BUTTON_WHEEL => {
-                allow_err!(en.mouse_down(MouseButton::Middle));
+        }
+        MOUSE_TYPE_UP => {
+            match buttons {
+                MOUSE_BUTTON_LEFT => {
+                    en.mouse_up(MouseButton::Left);
+                }
+                MOUSE_BUTTON_RIGHT => {
+                    en.mouse_up(MouseButton::Right);
+                }
+                MOUSE_BUTTON_WHEEL => {
+                    en.mouse_up(MouseButton::Middle);
+                }
+                MOUSE_BUTTON_BACK => {
+                    en.mouse_up(MouseButton::Back);
+                }
+                MOUSE_BUTTON_FORWARD => {
+                    en.mouse_up(MouseButton::Forward);
+                }
+                _ => {}
             }
-            MOUSE_BUTTON_BACK => {
-                allow_err!(en.mouse_down(MouseButton::Back));
-            }
-            MOUSE_BUTTON_FORWARD => {
-                allow_err!(en.mouse_down(MouseButton::Forward));
-            }
-            _ => {}
-        },
-        MOUSE_TYPE_UP => match buttons {
-            MOUSE_BUTTON_LEFT => {
-                en.mouse_up(MouseButton::Left);
-            }
-            MOUSE_BUTTON_RIGHT => {
-                en.mouse_up(MouseButton::Right);
-            }
-            MOUSE_BUTTON_WHEEL => {
-                en.mouse_up(MouseButton::Middle);
-            }
-            MOUSE_BUTTON_BACK => {
-                en.mouse_up(MouseButton::Back);
-            }
-            MOUSE_BUTTON_FORWARD => {
-                en.mouse_up(MouseButton::Forward);
-            }
-            _ => {}
-        },
+            #[cfg(windows)]
+            super::collab::on_release(conn);
+        }
         MOUSE_TYPE_WHEEL | MOUSE_TYPE_TRACKPAD => {
+            // 协作模式：滚轮落在真实光标所在处，必须先把它移过去，
+            // 否则会滚到所有者光标那边去；非持有者直接丢弃。
+            #[cfg(windows)]
+            let admitted = super::collab::admit_wheel(conn);
+            #[cfg(not(windows))]
+            let admitted = true;
+            #[cfg(windows)]
+            if let Some((px, py)) = super::collab::wheel_target(conn) {
+                en.mouse_move_to(px, py);
+            }
             #[allow(unused_mut)]
             let mut x = -evt.x;
             #[allow(unused_mut)]
@@ -1418,6 +1453,10 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
             #[cfg(not(windows))]
             {
                 y = -y;
+            }
+            if !admitted {
+                x = 0;
+                y = 0;
             }
 
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1460,6 +1499,9 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
                     en.mouse_scroll_x(x);
                 }
             }
+
+            #[cfg(windows)]
+            super::collab::after_wheel();
         }
         _ => {}
     }

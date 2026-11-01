@@ -56,6 +56,10 @@ pub mod rdp_input;
 pub mod dbus;
 #[cfg(not(target_os = "android"))]
 pub mod input_service;
+/// 协作模式（魔改）：移动只更新虚拟光标，点击才抢占真实光标与键盘。
+/// 设计见仓库根目录 `COLLAB_MODE_DESIGN.md`。
+#[cfg(target_os = "windows")]
+pub mod collab;
 } else {
 mod clipboard_service {
 pub const NAME: &'static str = "";

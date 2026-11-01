@@ -2349,6 +2349,17 @@ impl Connection {
         self.keyboard && !self.disable_keyboard
     }
 
+    /// 协作模式下键盘随控制权走；其余情况恒为真，不改变原有行为。
+    #[cfg(target_os = "windows")]
+    fn collab_keyboard_allowed(&self) -> bool {
+        super::collab::keyboard_allowed(self.inner.id())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn collab_keyboard_allowed(&self) -> bool {
+        true
+    }
+
     fn clipboard_enabled(&self) -> bool {
         self.clipboard && !self.disable_clipboard
     }
@@ -3338,7 +3349,7 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
-                    if self.peer_keyboard_enabled() {
+                    if self.peer_keyboard_enabled() && self.collab_keyboard_allowed() {
                         if is_enter(&me) {
                             CLICK_TIME.store(get_time(), Ordering::SeqCst);
                         }
@@ -7112,6 +7123,8 @@ mod raii {
             {
                 use crate::whiteboard;
                 whiteboard::unregister_whiteboard(whiteboard::get_key_cursor(self.0));
+                #[cfg(target_os = "windows")]
+                crate::server::collab::detach(self.0);
             }
         }
     }
