@@ -120,9 +120,18 @@ pub fn update_whiteboard(k: String, e: CustomEvent) {
     }
 }
 
+/// 把当前模式推给白板进程，用于绘制状态角标。返回是否送达。
+pub fn push_mode(collab: bool) -> bool {
+    TX_WHITEBOARD
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|tx| tx.send((String::new(), CustomEvent::Mode(collab))).is_ok())
+        .unwrap_or(false)
+}
+
 #[inline]
-fn tx_send_event(conn: &mut Conn, k: String, event: CustomEvent) {
-    if let CustomEvent::Cursor(cursor) = &event {
+fn tx_send_event(conn: &mut Conn, k: String, event: CustomEvent) {    if let CustomEvent::Cursor(cursor) = &event {
         if cursor.btns == 0 {
             conn.last_cursor_pos = (cursor.x, cursor.y);
         }

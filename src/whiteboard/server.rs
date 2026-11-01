@@ -20,6 +20,10 @@ use winit::event_loop::EventLoopProxy;
 lazy_static! {
     pub(super) static ref EVENT_PROXY: RwLock<Option<EventLoopProxy<(String, CustomEvent)>>> =
         RwLock::new(None);
+    /// 活着的 IPC 连接数。只有全部断开才退出白板进程，
+    /// 否则任一连接关闭都会把别人的覆盖层一起带走。
+    static ref ACTIVE_STREAMS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
 }
 
 const RIPPLE_DURATION: Duration = Duration::from_millis(500);
@@ -57,6 +61,7 @@ pub(super) async fn start_ipc(mut rx_exit: UnboundedReceiver<()>) {
                     Some(result) => match result {
                         Ok(stream) => {
                             log::debug!("Got new connection");
+                            ACTIVE_STREAMS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             tokio::spawn(handle_new_stream(Connection::new(stream)));
                         }
                         Err(err) => {
@@ -107,9 +112,31 @@ async fn handle_new_stream(mut conn: Connection) {
             }
         }
     }
-    EVENT_PROXY.read().unwrap().as_ref().map(|ep| {
-        allow_err!(ep.send_event(("".to_string(), CustomEvent::Exit)));
-    });
+    let remaining = ACTIVE_STREAMS
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+        .saturating_sub(1);
+    if remaining == 0 {
+        EVENT_PROXY.read().unwrap().as_ref().map(|ep| {
+            allow_err!(ep.send_event(("".to_string(), CustomEvent::Exit)));
+        });
+    }
+}
+
+/// 枚举每块显示器的矩形，供角标逐屏绘制。
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(super) fn get_displays() -> Vec<(i32, i32, u32, u32)> {
+    let mut rects = Vec::new();
+    if let Ok(displays) = crate::server::display_service::try_get_displays() {
+        for d in displays {
+            rects.push((
+                d.origin().0 as i32,
+                d.origin().1 as i32,
+                d.width() as u32,
+                d.height() as u32,
+            ));
+        }
+    }
+    rects
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]

@@ -76,6 +76,7 @@ pub(super) fn create_event_loop() -> ResultType<()> {
     let mut ripples: Vec<Ripple> = Vec::new();
     let mut last_cursors: HashMap<String, Cursor> = HashMap::new();
     let mut resized = final_size.is_none();
+    let mut collab_mode = false;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -211,6 +212,32 @@ pub(super) fn create_event_loop() -> ResultType<()> {
                     }
                 }
 
+                // 每块屏幕右上角都画一个模式角标：视频流是按显示器单独编码的，
+                // 只画主屏的话，共享别的屏时控制端就看不到。
+                if let Some(face) = face.as_ref() {
+                    let mut badge_paint = Paint::default();
+                    badge_paint.set_color_rgba8(32, 32, 32, 235);
+                    badge_paint.anti_alias = true;
+                    let label = if collab_mode {
+                        "协作模式 · 点击才生效"
+                    } else {
+                        "普通模式 · 双方均可控制"
+                    };
+                    for (dx, dy, dw, _dh) in super::server::get_displays() {
+                        let right = (dx + dw as i32) - origin.0;
+                        let top = dy - origin.1;
+                        draw_text(
+                            &mut pixmap,
+                            face,
+                            label,
+                            right as f32 - 300.0,
+                            top as f32 + 14.0,
+                            &badge_paint,
+                            20.0f32,
+                        );
+                    }
+                }
+
                 if let Err(e) = buffer.present() {
                     log::error!("Failed to present surface: {}", e);
                     return;
@@ -229,6 +256,9 @@ pub(super) fn create_event_loop() -> ResultType<()> {
                         });
                     }
                     last_cursors.insert(k, cursor);
+                }
+                CustomEvent::Mode(c) => {
+                    collab_mode = c;
                 }
                 CustomEvent::Exit => {
                     *control_flow = ControlFlow::Exit;

@@ -1,34 +1,33 @@
 //! 协作模式（Collab Mode）—— 所有者 + 租客的控制权模型。
 //!
-//! 与「浏览模式（View Mode）」并列的第三种会话模式。默认关闭，由环境变量
-//! `RUSTDESK_COLLAB=1` 开启。设计文档见仓库根目录 `COLLAB_MODE_DESIGN.md`。
+//! 与「浏览模式（View Mode）」并列的第三种会话模式。开关存在被控端配置项
+//! `collab-mode` 里（持久化），设计文档见仓库根目录 `COLLAB_MODE_DESIGN.md`。
 //!
 //! 三条不变量：
 //!
-//! 1. **单写者**：任何时刻最多一方能注入键鼠。
-//! 2. **所有权优先**：所有者（被控端物理使用者）一动，租客立刻失去控制权。
-//!    这不是缺陷——所有者输入来自硬件，软件层拦不住，详见设计文档 §2.4。
-//! 3. **点击才抢占**：移动只更新虚拟光标位置，按下才把真实光标瞬移到租客位置、抬起后归还。
+//! 1. **移动不碰真光标**：租客移动只更新虚拟光标，由白板浮窗绘制。
+//! 2. **点击必然碰真光标，但不归位**：按下时把光标挪到租客位置，抬起后**留在原地**。
+//!    归位那一次额外移动正是误选中/闪烁的根源，所以不做。
+//! 3. **所有者优先**：所有者一动键鼠，立即撤销租客的鼠标控制权。
 //!
-//! 虚拟光标画在被控端已有的 whiteboard 浮窗上，因此**不需要控制端也换魔改版**——
-//! 官方客户端连进来一样能看到自己的彩色指针。这也是本模块不复用 `show_my_cursor`
-//! 通道的原因：那条路被客户端绑死在浏览模式上，而浏览模式会让鼠标注入彻底失效。
+//! 键盘不设闸门——与原版一致，双方都可注入。键盘是刻意动作，靠协作默契而非权限。
+//!
+//! 虚拟光标画在被控端已有的 whiteboard 浮窗上，因此**控制端无需安装魔改版**。
 
-use enigo::{Enigo, MouseControllable};
-use hbb_common::log;
+use enigo::{Enigo, MouseButton, MouseControllable};
+use hbb_common::{config::Config, log};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// 租客最后一次活动后，键盘所有权保留多久（移动、点击、打字都会续期）。
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// 抬起后归还真实光标前的缓冲，给目标程序留出处理 click 的时间。
-const RESTORE_DELAY: Duration = Duration::from_millis(150);
+const COLLAB_OPTION: &str = "collab-mode";
+
 /// 所有者光标位移超过该像素数即视为"所有者在动"。
 const OWNER_ACTIVE_DISTANCE: i32 = 5;
 /// 自身注入后多久内的输入变化不算所有者活动。
-const INJECTION_SETTLE: Duration = Duration::from_millis(50);
+/// 太短会把注入的抬起误判成所有者在操作，导致控制权被自己撤销、键盘失效。
+const INJECTION_SETTLE: Duration = Duration::from_millis(200);
 
 const NO_POS: (i32, i32) = (i32::MIN, i32::MIN);
 
@@ -54,17 +53,13 @@ impl Tenant {
 struct Collab {
     inited: bool,
     enabled: bool,
+    /// 白板角标需要重新推送一次模式。
+    badge_dirty: bool,
     tenants: HashMap<i32, Tenant>,
-    /// 键鼠注入权的持有者；`None` 表示无人持有。
+    /// 当前持有鼠标注入权的连接。
     holder: Option<i32>,
-    /// 持有者的过期时刻，租客有活动就续期。
-    holder_deadline: Option<Instant>,
-    /// 真实光标当前是否被租客占用（按下到抬起之间）。
+    /// 真实光标是否正被租客占用（按下到抬起之间）。
     cursor_held: bool,
-    /// 抢占前所有者光标所在位置，归还时用。
-    owner_saved: Option<(i32, i32)>,
-    /// 计划归还真实光标的时刻。
-    restore_at: Option<Instant>,
     last_inject_at: Option<Instant>,
     last_owner_tick: Option<u32>,
     owner_pos: Option<(i32, i32)>,
@@ -75,12 +70,10 @@ impl Collab {
         Self {
             inited: false,
             enabled: false,
+            badge_dirty: true,
             tenants: HashMap::new(),
             holder: None,
-            holder_deadline: None,
             cursor_held: false,
-            owner_saved: None,
-            restore_at: None,
             last_inject_at: None,
             last_owner_tick: None,
             owner_pos: None,
@@ -96,26 +89,45 @@ fn state() -> MutexGuard<'static, Collab> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 协作模式是否开启。首次调用时读环境变量，只读一次。
+fn option_to_bool(v: &str) -> bool {
+    v == "Y" || v == "1" || v.eq_ignore_ascii_case("true")
+}
+
+/// 协作模式是否开启。首次调用时从配置读一次。
 pub fn enabled() -> bool {
     let mut s = state();
     if !s.inited {
         s.inited = true;
-        s.enabled = std::env::var("RUSTDESK_COLLAB")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        s.enabled = option_to_bool(&Config::get_option(COLLAB_OPTION));
         log::info!("collab mode enabled: {}", s.enabled);
     }
     s.enabled
+}
+
+/// 切换模式：写回配置（持久化）、释放按键、刷新角标。
+pub fn set_mode(on: bool) {
+    Config::set_option(
+        COLLAB_OPTION.to_owned(),
+        if on { "Y" } else { "N" }.to_owned(),
+    );
+    {
+        let mut s = state();
+        s.inited = true;
+        s.enabled = on;
+        s.badge_dirty = true;
+        s.holder = None;
+        s.cursor_held = false;
+    }
+    // 切模式时租客可能正按着键，必须补发抬起，否则所有者那边会一直处于按下状态。
+    release_all_buttons();
+    crate::whiteboard::push_mode(on);
+    log::info!("collab mode switched to {}", on);
 }
 
 /// 连接建立后登记身份，并启动承载虚拟光标的 whiteboard 浮窗。
 ///
 /// 幂等：同一个 conn 重复调用只会更新名字与颜色。
 pub fn attach(conn: i32, name: String, argb: u32) {
-    if !enabled() {
-        return;
-    }
     let mut newly = false;
     {
         let mut s = state();
@@ -135,11 +147,13 @@ pub fn attach(conn: i32, name: String, argb: u32) {
                 t.cursor = crate::get_cursor_pos().unwrap_or(NO_POS);
             }
         }
+        s.badge_dirty = true;
     }
     if newly {
         crate::whiteboard::register_whiteboard(crate::whiteboard::get_key_cursor(conn));
         log::info!("collab: whiteboard registered for conn {}", conn);
     }
+    sync_badge();
 }
 
 /// 鼠标移动。返回 `true` 表示调用方照旧注入；`false` 表示只记录坐标。
@@ -159,9 +173,6 @@ pub fn on_move(conn: i32, x: i32, y: i32) -> bool {
                 t.cursor = (x, y);
             }
         }
-        if s.holder == Some(conn) {
-            s.holder_deadline = Some(now + IDLE_TIMEOUT);
-        }
         inject = s.cursor_held && s.holder == Some(conn);
         if inject {
             s.last_inject_at = Some(now);
@@ -178,6 +189,7 @@ pub fn on_move(conn: i32, x: i32, y: i32) -> bool {
         }
     }
     push_cursor(conn, x, y, argb, 0, name);
+    sync_badge();
     inject
 }
 
@@ -190,15 +202,12 @@ pub fn admit_press(conn: i32) -> bool {
     {
         let mut s = state();
         if s.cursor_held && s.holder != Some(conn) {
+            // 单租客场景下几乎不会发生；多租客留待后续。
             return false;
         }
-        if s.owner_saved.is_none() {
-            s.owner_saved = crate::get_cursor_pos();
-        }
         s.holder = Some(conn);
-        s.holder_deadline = Some(Instant::now() + IDLE_TIMEOUT);
         s.cursor_held = true;
-        s.restore_at = None;
+        s.last_inject_at = Some(Instant::now());
         if let Some(t) = s.tenants.get(&conn) {
             if t.cursor != NO_POS {
                 publish = Some((t.cursor.0, t.cursor.1, t.argb, t.name.clone()));
@@ -230,6 +239,9 @@ pub fn press_target(conn: i32) -> Option<(i32, i32)> {
 }
 
 /// 鼠标抬起。返回 `false` 表示该连接本就不持有控制权。
+///
+/// 这里**不把光标挪回去**：归位那一次额外移动会在目标程序仍认为按钮按下时变成拖拽，
+/// 造成误选中一片文字。
 pub fn on_release(conn: i32) -> bool {
     if !enabled() {
         return true;
@@ -240,10 +252,10 @@ pub fn on_release(conn: i32) -> bool {
         if s.holder != Some(conn) {
             return false;
         }
-        let now = Instant::now();
         s.cursor_held = false;
-        s.restore_at = Some(now + RESTORE_DELAY);
-        s.holder_deadline = Some(now + IDLE_TIMEOUT);
+        s.holder = None;
+        // 注入的抬起会刷新 GetLastInputInfo，必须重置沉降窗口起点。
+        s.last_inject_at = Some(Instant::now());
         if let Some(t) = s.tenants.get(&conn) {
             if t.cursor != NO_POS {
                 publish = Some((t.cursor.0, t.cursor.1, t.argb, t.name.clone()));
@@ -256,7 +268,7 @@ pub fn on_release(conn: i32) -> bool {
     true
 }
 
-/// 滚轮：是否有权滚动。返回 `false` 表示拒绝本次滚轮。
+/// 滚轮：是否有权滚动。
 pub fn admit_wheel(conn: i32) -> bool {
     if !enabled() {
         return true;
@@ -265,16 +277,7 @@ pub fn admit_wheel(conn: i32) -> bool {
     if s.cursor_held && s.holder != Some(conn) {
         return false;
     }
-    if let Some(h) = s.holder {
-        if h != conn && !s.cursor_held {
-            return false;
-        }
-    }
-    if s.owner_saved.is_none() {
-        s.owner_saved = crate::get_cursor_pos();
-    }
     s.holder = Some(conn);
-    s.holder_deadline = Some(Instant::now() + IDLE_TIMEOUT);
     s.last_inject_at = Some(Instant::now());
     true
 }
@@ -293,48 +296,29 @@ pub fn wheel_target(conn: i32) -> Option<(i32, i32)> {
     }
 }
 
-/// 滚轮结束后安排归还。仅在光标未被持续占用时生效。
+/// 滚轮结束后释放鼠标控制权。光标不归位。
 pub fn after_wheel() {
     if !enabled() {
         return;
     }
     let mut s = state();
     if !s.cursor_held {
-        let now = Instant::now();
-        s.restore_at = Some(now + RESTORE_DELAY);
-        s.holder_deadline = Some(now + IDLE_TIMEOUT);
-    }
-}
-
-/// 键盘闸门。只有当前持有者可以注入键盘；放行时顺带续期。
-pub fn keyboard_allowed(conn: i32) -> bool {
-    if !enabled() {
-        return true;
-    }
-    let mut s = state();
-    if s.holder == Some(conn) {
-        s.holder_deadline = Some(Instant::now() + IDLE_TIMEOUT);
-        true
-    } else {
-        false
+        s.holder = None;
+        s.last_inject_at = Some(Instant::now());
     }
 }
 
 /// 连接断开时清理，并关掉该连接对应的虚拟光标。
 pub fn detach(conn: i32) {
-    if !enabled() {
-        return;
-    }
     let registered;
     {
         let mut s = state();
         registered = s.tenants.remove(&conn).is_some();
         if s.holder == Some(conn) {
             s.holder = None;
-            s.holder_deadline = None;
             if s.cursor_held {
                 s.cursor_held = false;
-                s.restore_at = Some(Instant::now());
+                release_all_buttons();
             }
         }
     }
@@ -343,13 +327,13 @@ pub fn detach(conn: i32) {
     }
 }
 
-/// 由 33ms 光标采样线程驱动：检测所有者活动、释放过期持有权、执行归还。
+/// 由 33ms 光标采样线程驱动：检测所有者活动，撤销租客的鼠标控制权。
 pub fn poll(pos: Option<(i32, i32)>) {
     if !enabled() {
         return;
     }
     let now = Instant::now();
-    let mut restore_to = None;
+    let mut revoked_while_held = false;
     {
         let mut s = state();
         let settling = s
@@ -383,32 +367,44 @@ pub fn poll(pos: Option<(i32, i32)>) {
 
         if owner_active && s.holder.is_some() {
             s.holder = None;
-            s.holder_deadline = None;
-            s.cursor_held = false;
-            restore_to = s.owner_saved.take();
-        }
-
-        if let Some(d) = s.holder_deadline {
-            if now >= d {
-                s.holder = None;
-                s.holder_deadline = None;
-            }
-        }
-
-        if let Some(t) = s.restore_at {
-            if now >= t {
-                s.restore_at = None;
-                if s.owner_saved.is_some() {
-                    restore_to = s.owner_saved.take();
-                }
+            if s.cursor_held {
+                s.cursor_held = false;
+                revoked_while_held = true;
             }
         }
     }
 
-    if let Some(p) = restore_to {
-        crate::platform::windows::try_change_desktop();
-        let mut en = Enigo::new();
-        en.mouse_move_to(p.0, p.1);
+    if revoked_while_held {
+        // 中途夺回时必须补发抬起，否则所有者那边卡在按下状态。
+        release_all_buttons();
+    }
+    sync_badge();
+}
+
+/// 把所有鼠标键盲发一次抬起。对没按下的键无害。
+pub fn release_all_buttons() {
+    crate::platform::windows::try_change_desktop();
+    let mut en = Enigo::new();
+    for b in [
+        MouseButton::Left,
+        MouseButton::Right,
+        MouseButton::Middle,
+        MouseButton::Back,
+        MouseButton::Forward,
+    ] {
+        let _ = en.mouse_up(b);
+    }
+}
+
+/// 模式角标变化时推给白板进程，成功送达才清脏标记。
+fn sync_badge() {
+    let dirty = state().badge_dirty;
+    if !dirty {
+        return;
+    }
+    let on = enabled();
+    if crate::whiteboard::push_mode(on) {
+        state().badge_dirty = false;
     }
 }
 

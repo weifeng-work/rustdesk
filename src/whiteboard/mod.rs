@@ -28,6 +28,8 @@ pub enum CustomEvent {
     Cursor(Cursor),
     Clear,
     Exit,
+    /// 是否处于协作模式，用于在每块屏幕上绘制状态角标。
+    Mode(bool),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
