@@ -77,17 +77,21 @@ jobs:
           cargo build --release --locked 2>&1 | tee /tmp/build.log
           exit ${PIPESTATUS[0]}
 
+      - name: Fetch sciter runtime
+        shell: pwsh
+        run: |
+          # Sciter UI 版是运行时动态加载 sciter.dll 的（src/ui.rs:63），仓库不附带。
+          # 官方说明见 docs/README.md：需自行下载 https://sciter.com/ 的动态库。
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll" -OutFile sciter.dll
+          Get-Item sciter.dll | Format-Table Name, Length
+
       - name: Package artifact
         if: success()
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item target/release/rustdesk.exe out/
-          # Sciter UI 版是动态加载 sciter.dll 的（src/ui.rs:63），必须一起打包
-          Get-ChildItem -Path target -Recurse -Filter "sciter*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName out/ -Force; Write-Host "bundled $($_.Name)" }
-          Get-ChildItem -Path res -Filter "*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName out/ -Force; Write-Host "bundled $($_.Name)" }
+          Copy-Item sciter.dll out/
           Get-ChildItem out | Format-Table Name, Length
           Compress-Archive -Path out/* -DestinationPath rustdesk-collab-m1-windows-x64.zip -Force
 
