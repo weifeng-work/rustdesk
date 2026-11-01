@@ -1,0 +1,86 @@
+name: Collab CI (Windows)
+
+# 只为本项目的协作模式改动服务：做一次真实的 Windows 编译验证。
+# 上游 ci.yml 只跑 Linux，flutter-build.yml 需要 Flutter SDK + bridge codegen，
+# 两者都不适合「先验证 Rust 侧能不能编过」这个目标。
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - collab-m1
+      - collab
+      - master
+
+env:
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # 与上游 ci.yml / vcpkg.json 的 baseline 保持一致
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+
+jobs:
+  check-windows:
+    name: cargo check (x86_64-pc-windows-msvc)
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout (with hbb_common submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Show versions
+        shell: bash
+        run: |
+          rustc -V
+          cargo -V
+          cmake --version | head -1
+
+      - name: Locate libclang
+        shell: bash
+        run: |
+          for d in "/c/Program Files/LLVM/bin" "/c/Program Files (x86)/Microsoft Visual Studio/2022/Enterprise/VC/Tools/Llvm/x64/bin"; do
+            if [ -f "$d/libclang.dll" ]; then
+              echo "LIBCLANG_PATH=$d" >> "$GITHUB_ENV"
+              echo "found libclang in $d"
+              break
+            fi
+          done
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH:-(unset)}"
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install vcpkg dependencies
+        shell: bash
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        shell: bash
+        run: |
+          cargo check --release --locked 2>&1 | tee /tmp/check.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload check log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-check-log
+          path: /tmp/check.log
+          if-no-files-found: ignore
