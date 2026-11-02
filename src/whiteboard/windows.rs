@@ -76,7 +76,12 @@ pub(super) fn create_event_loop() -> ResultType<()> {
     let mut ripples: Vec<Ripple> = Vec::new();
     let mut last_cursors: HashMap<String, Cursor> = HashMap::new();
     let mut resized = final_size.is_none();
-    let mut collab_mode = false;
+    // 初始模式直接读被控端配置：IPC 首帧可能早于 collab::push_mode 的推送到达，
+    // 只依赖推送的话角标会停在默认值上，显示成错误的模式。
+    let mut collab_mode = {
+        let v = hbb_common::config::Config::get_option("collab-mode");
+        v == "Y" || v == "1" || v.eq_ignore_ascii_case("true")
+    };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -231,7 +236,7 @@ pub(super) fn create_event_loop() -> ResultType<()> {
                             face,
                             label,
                             right as f32 - 300.0,
-                            top as f32 + 14.0,
+                            top as f32 + 30.0,
                             &badge_paint,
                             20.0f32,
                         );

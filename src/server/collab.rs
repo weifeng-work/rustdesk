@@ -120,6 +120,14 @@ pub fn set_mode(on: bool) {
     }
     // 切模式时租客可能正按着键，必须补发抬起，否则所有者那边会一直处于按下状态。
     release_all_buttons();
+    if on {
+        // 运行中打开协作模式：普通模式下不启动浮窗，这里给已在线的连接补注册，
+        // 否则角标和虚拟光标都不会出现，必须重连才行。
+        let conns: Vec<i32> = state().tenants.keys().copied().collect();
+        for conn in conns {
+            crate::whiteboard::register_whiteboard(crate::whiteboard::get_key_cursor(conn));
+        }
+    }
     crate::whiteboard::push_mode(on);
     log::info!("collab mode switched to {}", on);
 }
@@ -149,7 +157,7 @@ pub fn attach(conn: i32, name: String, argb: u32) {
         }
         s.badge_dirty = true;
     }
-    if newly {
+    if newly && enabled() {
         crate::whiteboard::register_whiteboard(crate::whiteboard::get_key_cursor(conn));
         log::info!("collab: whiteboard registered for conn {}", conn);
     }
