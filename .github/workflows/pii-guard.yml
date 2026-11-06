@@ -1,0 +1,95 @@
+name: PII Guard
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan added lines for PII
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          PII_PATTERNS: ${{ secrets.PII_PATTERNS }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+
+          raw = os.environ.get("PII_PATTERNS", "").strip()
+          if not raw:
+              print("PII_PATTERNS secret not configured; skipping PII guard.")
+              sys.exit(0)
+
+          patterns = [(p["name"], re.compile(p["regex"], re.I)) for p in json.loads(raw)]
+
+          SKIP_EXT = {
+              ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip",
+              ".gz", ".7z", ".mp4", ".woff", ".woff2", ".ttf", ".jar", ".exe",
+              ".dll", ".so", ".bin", ".lock", ".map",
+          }
+
+          def git(*args):
+              return subprocess.run(["git", *args], check=True, text=True,
+                                    capture_output=True).stdout
+
+          def mask(hit):
+              return (hit[:2] + "***" + hit[-2:]) if len(hit) > 4 else "***"
+
+          base = os.environ.get("PR_BASE_SHA") if os.environ.get("EVENT_NAME") == "pull_request" else os.environ.get("BEFORE_SHA")
+          head = os.environ.get("HEAD_SHA") or "HEAD"
+          if not base or set(base) == {"0"}:
+              try:
+                  base = git("rev-parse", f"{head}^").strip()
+              except subprocess.CalledProcessError:
+                  print("No parent commit; nothing to scan.")
+                  sys.exit(0)
+
+          findings = []
+
+          diff = git("diff", "--unified=0", "--no-color", base, head, "--", ".")
+          current = None
+          newline = 0
+          for line in diff.splitlines():
+              if line.startswith("+++ b/"):
+                  current = line[6:]
+                  continue
+              if line.startswith("@@"):
+                  m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
+                  newline = int(m.group(1)) if m else 0
+                  continue
+              if not line.startswith("+") or line.startswith("+++"):
+                  continue
+              if current and os.path.splitext(current)[1].lower() in SKIP_EXT:
+                  newline += 1
+                  continue
+              text = line[1:]
+              for name, rx in patterns:
+                  m = rx.search(text)
+                  if m:
+                      findings.append((current, newline, name, mask(m.group(0))))
+              newline += 1
+
+          for msg in git("log", "--format=%B", f"{base}..{head}").splitlines():
+              for name, rx in patterns:
+                  m = rx.search(msg)
+                  if m:
+                      findings.append(("<commit message>", 0, name, mask(m.group(0))))
+
+          if findings:
+              print("Potential PII detected in new commits:")
+              for path, ln, name, masked in findings:
+                  print(f"::error file={path},line={ln}::PII ({name}) matched: {masked}")
+              sys.exit(1)
+          print("PII guard: clean.")
+          PY
